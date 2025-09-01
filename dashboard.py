@@ -1,9 +1,6 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
-from datetime import datetime
-import numpy as np
 import openpyxl 
 import io
 
@@ -14,41 +11,64 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- INSTRUÇÃO IMPORTANTE: As credenciais agora são gerenciadas via st.secrets ---
-# Certifique-se de ter o arquivo .streamlit/secrets.toml configurado
-FILE_PATH = st.secrets["file_credentials"]["path"]
+# --- CONFIGURAÇÕES DO ARQUIVO ---
+# O nome do arquivo Excel. Ele DEVE estar na mesma pasta que este script.
+# Certifique-se de que o nome do seu arquivo corresponde exatamente a este.
+FILE_NAME = "Remessas Petrobras - Oficial - ATUALIZADA.xlsm" 
+
+# As credenciais agora são lidas do arquivo de segredos (secrets)
+# O caminho do arquivo não é mais necessário aqui.
 SHEET_NAME = st.secrets["file_credentials"]["sheet_name"]
 SHEET_PASSWORD = st.secrets["file_credentials"]["password"]
 
 # --- Funções Auxiliares ---
 def format_currency(value):
+    """Formata um número para o padrão de moeda brasileiro (R$)."""
     if pd.isna(value): return "R$ 0,00"
     return f"R$ {value:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 def format_foreign_currency(value):
+    """Formata um número para o padrão de moeda estrangeira."""
     if pd.isna(value): return "0.00"
     return f"{value:,.2f}"
 
 # --- Funções de Carregamento e Tratamento de Dados ---
 @st.cache_data(ttl=600)
-def load_data(file_path, sheet_name, password):
+def load_data(file_name, sheet_name, password):
+    """
+    Carrega os dados de um arquivo Excel protegido por senha.
+    O arquivo deve estar no mesmo diretório que o script.
+    """
     try:
-        with open(file_path, "rb") as f:
+        # Abre o arquivo local (que foi enviado junto com o app)
+        with open(file_name, "rb") as f:
             in_memory_file = io.BytesIO(f.read())
+        
         workbook = openpyxl.load_workbook(in_memory_file)
+        
         if sheet_name not in workbook.sheetnames:
             st.error(f"Erro: A aba '{sheet_name}' não foi encontrada na planilha. Abas disponíveis: {workbook.sheetnames}")
             return None, None
+            
         sheet = workbook[sheet_name]
+        
+        # Desprotege a planilha se a senha for fornecida
         if sheet.protection.sheet and password:
             sheet.protection.password = password
+            
+        # Salva a planilha desprotegida em memória para o pandas ler
         output_buffer = io.BytesIO()
         workbook.save(output_buffer)
         output_buffer.seek(0)
+        
         df = pd.read_excel(output_buffer, sheet_name=sheet_name, skiprows=1)
+        
+        # Renomeia e limpa as colunas
         df.rename(columns={'Data de Pagamento': 'data_pagamento', 'Valor em R$': 'valor_principal_rs','Número do RM': 'numero_rm', 'Correspondente': 'correspondente','ND recebida': 'nd_recebida', 'IOF': 'iof', 'TX CONTRATO': 'tx_contrato','IRRF': 'irrf', 'CIDE': 'cide', 'Moeda': 'moeda', 'Valor': 'valor_moeda_origem'}, inplace=True)
         cols_to_keep = ['data_pagamento', 'valor_principal_rs', 'numero_rm', 'correspondente', 'nd_recebida', 'iof', 'tx_contrato', 'irrf', 'cide', 'moeda', 'valor_moeda_origem']
         df = df[[col for col in cols_to_keep if col in df.columns]]
+        
+        # Converte e trata os dados
         numeric_cols = ['valor_principal_rs', 'iof', 'tx_contrato', 'irrf', 'cide', 'valor_moeda_origem']
         for col in numeric_cols: df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
         df['numero_rm'] = df['numero_rm'].fillna('Não informado').astype(str)
@@ -56,17 +76,22 @@ def load_data(file_path, sheet_name, password):
         df['correspondente'] = df['correspondente'].fillna('Não informado')
         df['moeda'] = df['moeda'].fillna('N/A')
         df['data_pagamento'] = pd.to_datetime(df['data_pagamento'], errors='coerce', dayfirst=True)
-        df['status'] = np.where(pd.notna(df['data_pagamento']), 'Pago', 'Pendente')
+        
+        # Cria colunas calculadas
+        df['status'] = 'Pendente'
+        df.loc[pd.notna(df['data_pagamento']), 'status'] = 'Pago'
         df['valor_total_pago'] = df['valor_principal_rs'] + df['iof'] + df['tx_contrato'] + df['irrf'] + df['cide']
+        
         return df[df['status'] == 'Pago'], df[df['status'] == 'Pendente']
+
     except FileNotFoundError:
-        st.error(f"Erro: O arquivo não foi encontrado no caminho especificado: {file_path}")
+        st.error(f"Erro Crítico: O arquivo de dados '{file_name}' não foi encontrado. Certifique-se de que ele foi enviado para o repositório do GitHub junto com o script.")
         return None, None
     except Exception as e:
-        st.error(f"Ocorreu um erro ao carregar o arquivo: {e}")
+        st.error(f"Ocorreu um erro inesperado ao carregar o arquivo: {e}")
         return None, None
 
-# --- Funções das Páginas ---
+# --- Funções das Páginas (não foram modificadas) ---
 def display_visao_geral(df_pago):
     st.header("Visão Geral dos Pagamentos")
     st.subheader("Indicadores Chave de Performance (KPIs)")
@@ -162,9 +187,9 @@ def display_correspondentes(df_pago, df_pendente):
 # --- Interface Principal ---
 st.title("🔵 Dashboard de Análise Financeira")
 
-df_pago_original, df_pendente_original = load_data(FILE_PATH, SHEET_NAME, SHEET_PASSWORD)
+df_pago_original, df_pendente_original = load_data(FILE_NAME, SHEET_NAME, SHEET_PASSWORD)
 if df_pago_original is None:
-    st.error("Falha ao carregar os dados. Verifique as configurações de caminho e senha no script.")
+    st.warning("Aguardando o carregamento dos dados. Se o erro persistir, verifique o console para mais detalhes.")
     st.stop()
 st.sidebar.success("Dados carregados com sucesso!")
 
@@ -181,6 +206,7 @@ rms, select_all_rms = sorted(df_completo_original['numero_rm'].unique()), st.sid
 default_rms = rms if select_all_rms else []
 selected_rms = st.sidebar.multiselect("Número do RM:", rms, default=default_rms)
 
+# Aplica os filtros
 df_pago_filtered, df_pendente_filtered = df_pago_original.copy(), df_pendente_original.copy()
 if len(date_range) == 2:
     start_date, end_date = pd.to_datetime(date_range[0]), pd.to_datetime(date_range[1])
